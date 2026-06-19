@@ -1,0 +1,326 @@
+#include "intrinsics.h"
+#include "msp430f5529.h"
+#include <msp430.h>
+#include <stdint.h>
+
+// Pines LED
+#define LED_RED_PIN     BIT0    // P2.0
+#define LED_GREEN_PIN   BIT3    // P2.3
+#define LED_BLUE_PIN    BIT6    // P2.6
+
+// Botones
+#define BUTTON_REACT_PIN    BIT1    // P2.1 (reacción)
+
+// Estados
+#define ESTADO_AZUL     0
+#define ESTADO_ROJO     1
+#define ESTADO_ESPERA   2
+#define ESTADO_VERDE    3
+
+volatile unsigned char estado_actual = ESTADO_AZUL;
+volatile unsigned int tiempo_aleatorio = 0;
+volatile unsigned int contador_tiempo = 0;
+volatile unsigned int semilla_random = 12345;
+volatile unsigned int flag_listo_reaccion = 0;
+volatile unsigned int tiempo_reaccion = 0;
+volatile unsigned char intento_actual = 0;
+volatile unsigned int tiempos_reaccion[3] = {0,0,0};
+volatile unsigned long suma_tiempos = 0;
+
+volatile unsigned char bandera_uart = 0;
+volatile unsigned char estado_led = 0;
+
+// --- UART ---
+void configurar_DCO_16MHz(void);
+void configurar_uart(void);
+void envia_byte_uart(unsigned char dato);
+void envia_string_uart(const char *str);
+void envia_numero_uart(unsigned long num);
+void enviar_resultados(void);
+
+
+
+// --- LEDs ---
+void set_color_azul(void) {
+    P2OUT &= ~(LED_RED_PIN | LED_GREEN_PIN);
+    P2OUT |= LED_BLUE_PIN;
+}
+void set_color_rojo(void) {
+    P2OUT &= ~(LED_GREEN_PIN | LED_BLUE_PIN);
+    P2OUT |= LED_RED_PIN;
+}
+void set_color_verde(void) {
+    P2OUT &= ~(LED_RED_PIN | LED_BLUE_PIN);
+    P2OUT |= LED_GREEN_PIN;
+}
+
+void generar_tiempo_aleatorio(void) {
+    semilla_random ^= TA0R;
+    semilla_random = (semilla_random >> 1) ^ (-(semilla_random & 1u) & 0xB400u);
+    tiempo_aleatorio = 100 + (semilla_random % 401); // 1–5 s
+    contador_tiempo = 0;
+}
+
+void reiniciar_juego(void)
+{
+    intento_actual = 0;
+    suma_tiempos = 0;
+
+    tiempos_reaccion[0] = 0;
+    tiempos_reaccion[1] = 0;
+    tiempos_reaccion[2] = 0;
+
+    contador_tiempo = 0;
+    flag_listo_reaccion = 0;
+
+    TA1CTL = TASSEL_2 | ID_3 | MC_0 | TACLR;
+}
+
+// --- UART ---
+void configurar_DCO_16MHz(void) {
+    UCSCTL3 = SELREF_2;
+    UCSCTL4 |= SELA_2;
+    UCSCTL0 = 0x0000;
+    do {
+        UCSCTL7 &= ~(XT2OFFG + XT1LFOFFG + DCOFFG);
+        SFRIFG1 &= ~OFIFG;
+    } while (SFRIFG1 & OFIFG);
+    __bis_SR_register(SCG0);
+    UCSCTL1 = DCORSEL_5;
+    UCSCTL2 = 487;
+    __bic_SR_register(SCG0);
+    __delay_cycles(500000);
+}
+
+void configurar_uart(void) {
+    P4SEL |= 0x30;
+    UCA1CTL1 |= UCSWRST;
+    UCA1CTL1 |= UCSSEL_2;
+    UCA1BR0 = 0x83;
+    UCA1BR1 = 0x06;
+    UCA1MCTL = UCBRS_0;
+    UCA1CTL1 &= ~UCSWRST;
+    UCA1IE |= UCRXIE;
+}
+
+void envia_byte_uart(unsigned char dato) {
+    while (!(UCA1IFG & UCTXIFG));
+    UCA1TXBUF = dato;
+}
+void envia_string_uart(const char *str) {
+    while (*str) {
+        envia_byte_uart(*str++);
+    }
+}
+
+void envia_numero_uart(unsigned long num)
+{
+    char buffer[11];
+    int i = 0;
+
+    if(num == 0){
+        envia_byte_uart('0');
+        return;
+    }
+
+    while(num > 0){
+        buffer[i++] = (num % 10) + '0';
+        num /= 10;
+    }
+
+    while(i > 0){
+        envia_byte_uart(buffer[--i]);
+    }
+}
+void enviar_resultados(void)
+{
+    unsigned int promedio;
+
+    promedio = suma_tiempos / 3;
+
+    envia_string_uart("T1:");
+    envia_numero_uart(tiempos_reaccion[0]);
+
+    envia_string_uart(",T2:");
+    envia_numero_uart(tiempos_reaccion[1]);
+
+    envia_string_uart(",T3:");
+    envia_numero_uart(tiempos_reaccion[2]);
+
+    envia_string_uart(",TF:");
+    envia_numero_uart(promedio);
+
+    envia_string_uart("\r\n");
+}
+
+// --- Configuración ---
+void configura_puertos(void) {
+    P2DIR |= LED_RED_PIN | LED_GREEN_PIN | LED_BLUE_PIN;
+    set_color_azul();
+}
+void configura_boton_reaccion(void) {
+    P2DIR &= ~BUTTON_REACT_PIN;
+    P2REN |= BUTTON_REACT_PIN;
+    P2OUT |= BUTTON_REACT_PIN;
+    P2IES |= BUTTON_REACT_PIN;
+    P2IFG &= ~BUTTON_REACT_PIN;
+    P2IE  |= BUTTON_REACT_PIN;
+}
+void configura_timerA0(void) {
+    TA0CTL = TASSEL_2 | MC_2 | TACLR;
+}
+void configura_timerA1(void) {
+    TA1CCR0 = 10000 - 1;           // 10 ms reales
+    TA1CCTL0 = CCIE;               // Habilitar interrupción
+    TA1EX0 = TAIDEX_1;             // División adicional ÷2
+    TA1CTL = TASSEL_2 | ID_3 | MC_0 | TACLR; // SMCLK ÷8, detenido
+}
+
+// --- Main ---
+int main(void) {
+    WDTCTL = WDTPW | WDTHOLD;
+    configurar_DCO_16MHz();
+    configurar_uart();
+    configura_puertos();
+    configura_boton_reaccion();
+    configura_timerA0();
+    configura_timerA1();
+    __enable_interrupt();
+
+
+
+    while(1)
+    {
+        if(bandera_uart)
+        {
+            bandera_uart = 0;
+
+            // Reiniciar variables
+            reiniciar_juego();
+
+            // Regresar tiempos a cero
+            tiempos_reaccion[0] = 0;
+            tiempos_reaccion[1] = 0;
+            tiempos_reaccion[2] = 0;
+            suma_tiempos = 0;
+
+            // Enviar ceros a la app
+            enviar_resultados();
+
+            // Pantalla azul inicial
+            set_color_azul();
+
+            __delay_cycles(16000000);   // 1 segundo
+
+            // Comenzar ronda
+            set_color_rojo();
+
+            estado_actual = ESTADO_ROJO;
+
+            contador_tiempo = 0;
+
+            generar_tiempo_aleatorio();
+
+            TA1R = 0;
+            TA1CTL = TASSEL_2 | ID_3 | MC_1 | TACLR;
+        }
+
+        __bis_SR_register(LPM0_bits + GIE);
+    }
+}
+
+// --- ISR Botón inicio ---
+#pragma vector=USCI_A1_VECTOR
+__interrupt void USCI_A1_ISR(void)
+{
+    char comando = UCA1RXBUF;
+
+    if (comando == '1')
+    {
+        bandera_uart = 1;
+    }
+
+    __bic_SR_register_on_exit(LPM0_bits);
+}
+
+// --- ISR Botón reacción ---
+#pragma vector=PORT2_VECTOR
+__interrupt void PORT2_ISR(void)
+{
+    if (P2IFG & BUTTON_REACT_PIN)
+    {
+        P2IFG &= ~BUTTON_REACT_PIN;
+
+        if (estado_actual == ESTADO_VERDE && flag_listo_reaccion)
+        {
+            tiempo_reaccion = contador_tiempo * 10;
+
+            tiempos_reaccion[intento_actual] = tiempo_reaccion;
+            suma_tiempos += tiempo_reaccion;
+
+            intento_actual++;
+            flag_listo_reaccion = 0;
+
+            /* Envía el string completo con los faltantes en 0 */
+            enviar_resultados();
+
+            if (intento_actual >= 3)
+            {
+                TA1CTL = TASSEL_2 | ID_3 | MC_0 | TACLR;
+
+                set_color_azul();
+                estado_actual = ESTADO_AZUL;
+            }
+            else
+            {
+                set_color_rojo();
+
+                estado_actual = ESTADO_ROJO;
+
+                contador_tiempo = 0;
+                tiempo_aleatorio = 100;
+
+                TA1R = 0;
+                TA1CTL = TASSEL_2 | ID_3 | MC_1 | TACLR;
+            }
+        }
+    }
+
+    __bic_SR_register_on_exit(LPM0_bits);
+}
+
+// --- ISR Timer A1 ---
+#pragma vector=TIMER1_A0_VECTOR
+__interrupt void TIMER1_A0_ISR(void)
+{
+    if (estado_actual == ESTADO_ROJO)
+    {
+        contador_tiempo++;
+
+        if (contador_tiempo >= tiempo_aleatorio)
+        {
+            generar_tiempo_aleatorio();
+            contador_tiempo = 0;
+            estado_actual = ESTADO_ESPERA;
+        }
+    }
+    else if (estado_actual == ESTADO_ESPERA)
+    {
+        contador_tiempo++;
+
+        if (contador_tiempo >= tiempo_aleatorio)
+        {
+            set_color_verde();
+
+            estado_actual = ESTADO_VERDE;
+            flag_listo_reaccion = 1;
+
+            contador_tiempo = 0;
+            TA1R = 0;
+        }
+    }
+    else if (estado_actual == ESTADO_VERDE)
+    {
+        contador_tiempo++;
+    }
+}
