@@ -1,0 +1,9 @@
+Integrantes: 
+-Hilaria Vallejo Gómez
+-Rodrigo Leonardo López Oropeza
+-Diego Fernando Arriaga Jimenez
+
+Breve explicación: El microcontrolador tiene una secuencia programada donde inicia la pantalla en azul, al presionar botón se manda por
+UART (bluetooth) la indicación de iniciar el juego por lo que cambia la pantalla a roja, se espera un segundo y luego toma un tiempo aleatorio. 
+Al cambiar a esa pantalla, está esperando una interrupción del botón del usuario para registrar el tiempo transcurrido desde el inicio de esa 
+pantalla hasta que se hace la interrupción. Hace tres intentos por juego y va registrando los resultados uno por uno y manda el promedio. 
